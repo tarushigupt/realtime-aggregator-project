@@ -1,0 +1,224 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Realtime Token Updates — Demo</title>
+  <style>
+    body { font-family: Inter, system-ui, Arial; margin: 18px; color: #111; }
+    h1 { margin-bottom: 8px; }
+    .controls { margin-bottom: 12px; }
+    button { margin-right: 8px; padding:6px 10px; }
+    #log { white-space: pre-wrap; max-height:160px; overflow:auto; border:1px solid #eee; padding:8px; background:#fafafa; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; }
+    th, td { padding:8px; border:1px solid #eee; text-align:left; }
+    tr.changed { background: #fff8e1; transition: background 0.6s; }
+    small { color:#666; }
+  </style>
+</head>
+<body>
+  <h1>Realtime Token Updates — Demo</h1>
+
+  <div class="controls">
+    <label>Server URL: <input id="serverUrl" value="http://127.0.0.1:3000" style="width:260px"></label>
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+    <label style="margin-left:12px">Query: <input id="queryInput" value="sol" style="width:120px"></label>
+    <button id="subscribeBtn" disabled>Subscribe</button>
+    <button id="unsubscribeBtn" disabled>Unsubscribe</button>
+    <button id="refreshList" disabled>Refresh list</button>
+    <label style="margin-left:12px">Admin token: <input id="adminToken" value="localadmintoken123" style="width:180px"></label>
+    <button id="forceEmitBtn" disabled>Force emit (admin)</button>
+  </div>
+
+  <div>
+    <small>Open DevTools Console to see raw events. This page fetches /tokens on subscribe and listens for socket events.</small>
+  </div>
+
+  <h3>Activity log</h3>
+  <div id="log">not connected</div>
+
+  <h3>Tokens</h3>
+  <table id="tokensTable" style="display:none">
+    <thead>
+      <tr><th>Ticker</th><th>Name</th><th>Price (SOL)</th><th>Volume (24h)</th><th>Liquidity</th><th>Changes</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+  <script>
+    let socket = null;
+    let currentQuery = null;
+    const logEl = document.getElementById('log');
+    const table = document.getElementById('tokensTable');
+    const tbody = table.querySelector('tbody');
+
+    function log(...args) {
+      console.log(...args);
+      logEl.textContent = (new Date()).toLocaleTimeString() + " — " + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ') + "\\n" + logEl.textContent;
+    }
+
+    function enableButtons(connected) {
+      document.getElementById('connectBtn').disabled = connected;
+      document.getElementById('disconnectBtn').disabled = !connected;
+      document.getElementById('subscribeBtn').disabled = !connected;
+      document.getElementById('unsubscribeBtn').disabled = !connected;
+      document.getElementById('refreshList').disabled = !connected;
+      document.getElementById('forceEmitBtn').disabled = !connected;
+    }
+
+    function renderTokens(list) {
+      tbody.innerHTML = '';
+      if (!list || list.length === 0) {
+        table.style.display = 'none';
+        return;
+      }
+      table.style.display = '';
+      for (const t of list) {
+        const tr = document.createElement('tr');
+        tr.dataset.addr = (t.token_address || '').toLowerCase();
+        tr.innerHTML = `
+          <td>${t.token_ticker ?? '-'}</td>
+          <td>${t.token_name ?? '-'}</td>
+          <td>${typeof t.price_sol === 'number' ? t.price_sol.toFixed(6) : '-'}</td>
+          <td>${typeof t.volume_sol === 'number' ? t.volume_sol : '-'}</td>
+          <td>${typeof t.liquidity_sol === 'number' ? t.liquidity_sol : '-'}</td>
+          <td class="changes">-</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function applyUpdate(update) {
+      // update: { token_address, changes, query }
+      const addr = (update.token_address || '').toLowerCase();
+      const tr = tbody.querySelector(`tr[data-addr="${addr}"]`);
+      if (!tr) {
+        // new token: append row
+        const t = document.createElement('tr');
+        t.classList.add('changed');
+        t.dataset.addr = addr;
+        t.innerHTML = `
+          <td>${update.changes.token_ticker ?? '-'}</td>
+          <td>${update.changes.token_name ?? '-'}</td>
+          <td>${typeof update.changes.price_sol === 'number' ? update.changes.price_sol.toFixed(6) : '-'}</td>
+          <td>${typeof update.changes.volume_sol === 'number' ? update.changes.volume_sol : '-'}</td>
+          <td>${typeof update.changes.liquidity_sol === 'number' ? update.changes.liquidity_sol : '-'}</td>
+          <td class="changes">new</td>
+        `;
+        tbody.prepend(t);
+        setTimeout(() => t.classList.remove('changed'), 1200);
+        return;
+      }
+
+      // highlight changed fields
+      tr.classList.add('changed');
+      const cols = tr.children;
+      if ('price_sol' in update.changes && cols[2]) cols[2].textContent = (typeof update.changes.price_sol === 'number' ? update.changes.price_sol.toFixed(6) : cols[2].textContent);
+      if ('volume_sol' in update.changes && cols[3]) cols[3].textContent = (typeof update.changes.volume_sol === 'number' ? update.changes.volume_sol : cols[3].textContent);
+      if ('liquidity_sol' in update.changes && cols[4]) cols[4].textContent = (typeof update.changes.liquidity_sol === 'number' ? update.changes.liquidity_sol : cols[4].textContent);
+
+      // show summarized changes
+      const changes = Object.keys(update.changes).map(k => `${k}:${update.changes[k]}`).join(", ");
+      if (cols[5]) cols[5].textContent = changes;
+
+      setTimeout(() => tr.classList.remove('changed'), 1200);
+    }
+
+    // UI bindings
+    document.getElementById('connectBtn').addEventListener('click', () => {
+      const url = document.getElementById('serverUrl').value.trim();
+      if (!url) return alert('set server url');
+      socket = io(url, { transports: ['websocket', 'polling'] });
+
+      socket.on('connect', () => {
+        log('connected', socket.id);
+        enableButtons(true);
+      });
+
+      socket.on('disconnect', (r) => {
+        log('disconnected', r);
+        enableButtons(false);
+      });
+
+      socket.on('connect_error', (err) => {
+        log('connect_error', err && err.message ? err.message : err);
+      });
+
+      socket.on('tokenUpdate', (data) => {
+        log('tokenUpdate', data);
+        applyUpdate(data);
+      });
+    });
+
+    document.getElementById('disconnectBtn').addEventListener('click', () => {
+      if (socket) socket.disconnect();
+      enableButtons(false);
+      log('disconnected manually');
+    });
+
+    document.getElementById('subscribeBtn').addEventListener('click', async () => {
+      if (!socket) return alert('not connected');
+      const q = document.getElementById('queryInput').value.trim().toLowerCase();
+      if (!q) return alert('set query');
+      currentQuery = q;
+      socket.emit('subscribe', `discover:${q}`);
+      log('subscribe sent for', q);
+
+      // fetch token list and render
+      try {
+        const url = document.getElementById('serverUrl').value.trim();
+        const resp = await fetch(`${url}/tokens?query=${encodeURIComponent(q)}&limit=50`);
+        const json = await resp.json();
+        renderTokens(json.data || []);
+        log('fetched list, total=', json.total);
+      } catch (e) {
+        log('failed to fetch tokens list', e);
+      }
+    });
+
+    document.getElementById('unsubscribeBtn').addEventListener('click', () => {
+      if (!socket) return;
+      const q = document.getElementById('queryInput').value.trim().toLowerCase();
+      socket.emit('unsubscribe', `discover:${q}`);
+      currentQuery = null;
+      log('unsubscribe sent for', q);
+    });
+
+    document.getElementById('refreshList').addEventListener('click', async () => {
+      const q = document.getElementById('queryInput').value.trim().toLowerCase();
+      if (!q) return alert('set query');
+      const url = document.getElementById('serverUrl').value.trim();
+      try {
+        const resp = await fetch(`${url}/tokens?query=${encodeURIComponent(q)}&limit=50`);
+        const json = await resp.json();
+        renderTokens(json.data || []);
+        log('refreshed list, total=', json.total);
+      } catch (e) {
+        log('refresh failed', e);
+      }
+    });
+
+    document.getElementById('forceEmitBtn').addEventListener('click', async () => {
+      const q = document.getElementById('queryInput').value.trim().toLowerCase();
+      if (!q) return alert('set query');
+      const url = document.getElementById('serverUrl').value.trim();
+      const token = document.getElementById('adminToken').value.trim();
+      try {
+        const r = await fetch(`${url}/admin/emit/${encodeURIComponent(q)}`, {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token }
+        });
+        const j = await r.json();
+        log('admin emit response', j);
+      } catch (e) {
+        log('admin emit failed', e);
+      }
+    });
+
+    // disable buttons initially
+    enableButtons(false);
+
+  </script>
+</body>
+</html>
