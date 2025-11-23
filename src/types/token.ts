@@ -9,6 +9,8 @@ export interface TokenData {
   liquidity_sol?: number;
   transaction_count?: number;
   price_1hr_change?: number;
+  price_24hr_change?: number;   // <-- added
+  price_7d_change?: number;
   protocol?: string;
   sources?: string[]; 
 }
